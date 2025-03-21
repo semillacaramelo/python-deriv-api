@@ -19,6 +19,15 @@ class ConstructionError(error_factory('ConstructionError')):
     pass
 
 
+class ConnectionError(error_factory('ConnectionError')):
+    """
+    Error related to WebSocket connections.
+    
+    Used when a connection is not found, cannot be established, or has other issues.
+    """
+    pass
+
+
 class ResponseError(Exception):
     def __init__(self, response: dict):
         super().__init__(response['error']['message'])

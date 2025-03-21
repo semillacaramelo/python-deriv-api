@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from asyncio import Future
-from typing import Dict, Optional, Union, Coroutine
+from typing import Dict, Optional, Union, Coroutine, Any, List
 
 import websockets
 from reactivex import operators as op
@@ -16,11 +16,12 @@ from websockets.frames import Close
 from deriv_api.cache import Cache
 from deriv_api.easy_future import EasyFuture
 from deriv_api.deriv_api_calls import DerivAPICalls
-from deriv_api.errors import APIError, ConstructionError, ResponseError, AddedTaskError
+from deriv_api.errors import APIError, ConstructionError, ResponseError, AddedTaskError, ConnectionError
 from deriv_api.in_memory import InMemory
 from deriv_api.subscription_manager import SubscriptionManager
 from deriv_api.utils import is_valid_url
 from deriv_api.middlewares import MiddleWares
+from deriv_api.connection_manager import ConnectionManager
 
 # TODO NEXT subscribe is not calling deriv_api_calls. that's , args not verified. can we improve it ?
 
@@ -55,6 +56,11 @@ class DerivAPI(DerivAPICalls):
     - create and use a previously opened connection:
     >>> connection = await websockets.connect('ws://...')
     >>> api = DerivAPI(connection=connection)
+    
+    - create multiple connections:
+    >>> api = DerivAPI(endpoint='ws://...', app_id=1234)
+    >>> second_conn_id = api.create_connection(endpoint='ws://...', app_id=5678)
+    >>> response = await api.ping(connection_id=second_conn_id)
 
     Parameters
     ----------
@@ -72,6 +78,9 @@ class DerivAPI(DerivAPICalls):
             middleware : MiddleWares
                 middlewares to call on certain API actions. Now two middlewares are supported: sendWillBeCalled and
                 sendIsCalled
+            auto_reconnect : bool
+                Whether to automatically reconnect on connection loss
+                
     Properties
     ----------
     cache: Cache
@@ -84,119 +93,116 @@ class DerivAPI(DerivAPICalls):
 
     storage: None
 
-    def __init__(self, **options: str) -> None:
+    def __init__(self, **options: Any) -> None:
+        # First, create the connection manager and default connection
+        self.connection_manager = ConnectionManager()
+        
+        # Extract common options
         endpoint = options.get('endpoint', 'ws.derivws.com')
+        app_id = options.get('app_id')
         lang = options.get('lang', 'EN')
         brand = options.get('brand', '')
+        auto_reconnect = options.get('auto_reconnect', False)
+        
+        # Set up cache and storage
         cache = options.get('cache', InMemory())
         storage: any = options.get('storage')
         self.middlewares: MiddleWares = options.get('middlewares', MiddleWares())
-        self.wsconnection: Optional[WebSocketClientProtocol] = None
-        self.wsconnection_from_inside = True
-        self.shouldReconnect = False
+        
+        # Set up global event observable
         self.events: Subject = Subject()
+        
+        # Connect connection manager events to API events for backward compatibility
+        self.connection_manager.events_subject.subscribe(
+            lambda event: self._handle_connection_event(event)
+        )
+        
+        # Forward errors to sanity_errors
+        self.sanity_errors: Subject = Subject()
+        self.connection_manager.error_subject.subscribe(
+            lambda event: self.sanity_errors.on_next(event.get('error', APIError("Unknown error")))
+        )
+        
+        # Create the default connection
         if options.get('connection'):
-            self.wsconnection: Optional[WebSocketClientProtocol] = options.get('connection')
-            self.wsconnection_from_inside = False
-        else:
-            if not options.get('app_id'):
-                raise ConstructionError('An app_id is required to connect to the API')
-
-            connection_argument = {
-                'app_id': str(options.get('app_id')),
-                'endpoint_url': self.get_url(endpoint),
+            # Use the provided connection
+            conn_options = {
+                'connection': options.get('connection'),
                 'lang': lang,
-                'brand': brand
+                'brand': brand,
+                'auto_reconnect': auto_reconnect
             }
-            self.__set_api_url(connection_argument)
-            self.shouldReconnect = True
-
+        else:
+            # Create a new connection
+            if not app_id:
+                raise ConstructionError('An app_id is required to connect to the API')
+            
+            conn_options = {
+                'endpoint': endpoint,
+                'app_id': app_id,
+                'lang': lang,
+                'brand': brand,
+                'auto_reconnect': auto_reconnect
+            }
+        
+        self.default_connection = self.connection_manager.create_connection(**conn_options)
+        
+        # Set up storage and cache
         self.storage: Optional[Cache] = None
         if storage:
             self.storage = Cache(self, storage)
         # If we have the storage look that one up
         self.cache = Cache(self.storage if self.storage else self, cache)
-
-        self.req_id = 0
-        self.pending_requests: Dict[str, Subject] = {}
-        # resolved: connected  rejected: disconnected  pending: not connected yet
-        self.connected = EasyFuture()
+        
+        # Set up other state
         self.subscription_manager: SubscriptionManager = SubscriptionManager(self)
-        self.sanity_errors: Subject = Subject()
         self.expect_response_types = {}
-        self.wait_data_task = EasyFuture().set_result(1)
-        self.add_task(self.api_connect(), 'api_connect')
-        self.add_task(self.__wait_data(), 'wait_data')
-
-    async def __wait_data(self):
-        await self.connected
-        while self.connected.is_resolved():
-            try:
-                data = await self.wsconnection.recv()
-            except ConnectionClosed as err:
-                if self.connected.is_resolved():
-                    self.connected = EasyFuture().reject(err)
-                    self.connected.exception()  # call it to hide the warning of 'exception never retrieved'
-                self.sanity_errors.on_next(err)
-                break
-            except Exception as err:
-                self.sanity_errors.on_next(err)
-                continue
-            response = json.loads(data)
-
-            self.events.on_next({'name': 'message', 'data': response})
-            # TODO NEXT onopen onclose, can be set by await connection
-            req_id = response.get('req_id', None)
-            if not req_id or req_id not in self.pending_requests:
-                self.sanity_errors.on_next(APIError("Extra response"))
-                continue
-            expect_response: Future = self.expect_response_types.get(response['msg_type'])
-            if expect_response and not expect_response.done():
-                expect_response.set_result(response)
-            request = response['echo_req']
-
-            # When one of the child subscriptions of `proposal_open_contract` has an error in the response,
-            # it should be handled in the callback of consumer instead. Calling `error()` with parent subscription
-            # will mark the parent subscription as complete and all child subscriptions will be forgotten.
-
-            is_parent_subscription = request and request.get('proposal_open_contract') and not request.get(
-                'contract_id')
-            if response.get('error') and not is_parent_subscription:
-                self.pending_requests[req_id].on_error(ResponseError(response))
-                continue
-
-            # on_error will stop a subject object
-            if self.pending_requests[req_id].is_stopped and response.get('subscription'):
-                # Source is already marked as completed. In this case we should
-                # send a forget request with the subscription id and ignore the response received.
-                subs_id = response['subscription']['id']
-                self.add_task(self.forget(subs_id), 'forget subscription')
-                continue
-
-            self.pending_requests[req_id].on_next(response)
-
-    def __set_api_url(self, connection_argument: dict) -> None:
+        
+        # Connect the default connection
+        self.add_task(self._connect_default(), 'connect_default')
+    
+    async def _connect_default(self):
         """
-        Construct the websocket request url
-
+        Connect the default connection.
+        """
+        connection = self.connection_manager.get_connection(self.default_connection)
+        if connection:
+            await connection.connect()
+    
+    def _handle_connection_event(self, event: Dict[str, Any]):
+        """
+        Handle events from connections.
+        """
+        # Only forward events from the default connection for backward compatibility
+        if event.get('connection_id') == self.default_connection:
+            # Map new event names to old event names for backward compatibility
+            event_name = event.get('name')
+            
+            if event_name == 'message':
+                self.events.on_next({'name': 'message', 'data': event.get('data')})
+            elif event_name == 'send':
+                self.events.on_next({'name': 'send', 'data': event.get('data')})
+            elif event_name == 'connect':
+                self.events.on_next({'name': 'connect'})
+            elif event_name in ['close', 'connection_closed']:
+                self.events.on_next({'name': 'close'})
+    
+    def create_connection(self, **options) -> int:
+        """
+        Create a new connection.
+        
         Parameters
         ----------
-        connection_argument : dict
-
-        """
-        self.api_url = connection_argument.get('endpoint_url') + "/websockets/v3?app_id=" + connection_argument.get(
-            'app_id') + "&l=" + connection_argument.get('lang') + "&brand=" + connection_argument.get('brand')
-
-    def __get_api_url(self) -> str:
-        """
-            Returns the api request url
-
+        **options
+            Connection options. See ConnectionManager.create_connection for details.
+            
         Returns
         -------
-            websocket api request url
+        int
+            The ID of the newly created connection
         """
-        return self.api_url
-
+        return self.connection_manager.create_connection(**options)
+    
     def get_url(self, original_endpoint: str) -> Union[str, ConstructionError]:
         """
         Validate and return the url
@@ -209,7 +215,6 @@ class DerivAPI(DerivAPICalls):
         Returns
         -------
             Returns api url. If validation fails then throws constructionError
-
         """
         if not isinstance(original_endpoint, str):
             raise ConstructionError(f"Endpoint must be a string, passed: {type(original_endpoint)}")
@@ -224,23 +229,7 @@ class DerivAPI(DerivAPICalls):
 
         return url
 
-    async def api_connect(self) -> websockets.WebSocketClientProtocol:
-        """
-            Make a websockets connection and returns WebSocketClientProtocol
-        Returns
-        -------
-            Returns websockets.WebSocketClientProtocol
-        """
-        if not self.wsconnection and self.shouldReconnect:
-            self.events.on_next({'name': 'connect'})
-            self.wsconnection = await websockets.connect(self.api_url)
-        if self.connected.is_pending():
-            self.connected.resolve(True)
-        else:
-            self.connected = EasyFuture().resolve(True)
-        return self.wsconnection
-
-    async def send(self, request: dict) -> dict:
+    async def send(self, request: dict, connection_id: Optional[int] = None) -> dict:
         """
         Send the API call and returns response
 
@@ -248,30 +237,41 @@ class DerivAPI(DerivAPICalls):
         ----------
         request : dict
             API request
+        connection_id : Optional[int]
+            The connection ID to use. If None, uses the default connection.
 
         Returns
         -------
             API response
         """
-
+        # Apply middleware
         send_will_be_called = self.middlewares.call('sendWillBeCalled', {'request': request})
         if send_will_be_called:
             return send_will_be_called
-
-        self.events.on_next({'name': 'send', 'data': request})
-        response_future = self.send_and_get_source(request).pipe(op.first(), op.to_future())
-
-        response = await response_future
+        
+        # Use the specified connection or default
+        conn_id = connection_id if connection_id is not None else self.default_connection
+        connection = self.connection_manager.get_connection(conn_id)
+        
+        if not connection:
+            raise ConnectionError(f"Connection {conn_id} not found")
+        
+        # Send the request
+        response = await connection.send(request)
+        
+        # Cache the response
         self.cache.set(request, response)
         if self.storage:
             self.storage.set(request, response)
+        
+        # Apply middleware
         send_is_called = self.middlewares.call('sendIsCalled', {'response': response, 'request': request})
         if send_is_called:
             return send_is_called
+        
         return response
 
-
-    def send_and_get_source(self, request: dict) -> Subject:
+    def send_and_get_source(self, request: dict, connection_id: Optional[int] = None) -> Subject:
         """
         Send message and returns Subject
 
@@ -279,28 +279,24 @@ class DerivAPI(DerivAPICalls):
         ----------
         request : dict
             API request
+        connection_id : Optional[int]
+            The connection ID to use. If None, uses the default connection.
 
         Returns
         -------
             Returns the Subject
         """
-        pending = Subject()
-        if 'req_id' not in request:
-            self.req_id += 1
-            request['req_id'] = self.req_id
-        self.pending_requests[request['req_id']] = pending
+        # Use the specified connection or default
+        conn_id = connection_id if connection_id is not None else self.default_connection
+        connection = self.connection_manager.get_connection(conn_id)
+        
+        if not connection:
+            raise ConnectionError(f"Connection {conn_id} not found")
+        
+        # Send the request and return the source
+        return connection.send_and_get_source(request)
 
-        async def send_message():
-            try:
-                await self.connected
-                await self.wsconnection.send(json.dumps(request))
-            except Exception as err:
-                pending.on_error(err)
-
-        self.add_task(send_message(), 'send_message')
-        return pending
-
-    async def subscribe(self, request: dict) -> Observable:
+    async def subscribe(self, request: dict, connection_id: Optional[int] = None) -> Observable:
         """
         Subscribe to a given request
 
@@ -308,6 +304,8 @@ class DerivAPI(DerivAPICalls):
         ----------
             request : dict
                 Subscribe request
+            connection_id : Optional[int]
+                The connection ID to use. If None, uses the default connection.
 
         Example
         -------
@@ -317,10 +315,9 @@ class DerivAPI(DerivAPICalls):
         -------
             Observable
         """
+        return await self.subscription_manager.subscribe(request, connection_id)
 
-        return await self.subscription_manager.subscribe(request)
-
-    async def forget(self, subs_id: str) -> dict:
+    async def forget(self, subs_id: str, connection_id: Optional[int] = None) -> dict:
         """
         Forget / unsubscribe the specific subscription.
 
@@ -328,15 +325,16 @@ class DerivAPI(DerivAPICalls):
         ----------
             subs_id : str
                 subscription id
+            connection_id : Optional[int]
+                The connection ID to use. If None, uses the default connection.
 
         Returns
         -------
             Returns dict
         """
+        return await self.subscription_manager.forget(subs_id, connection_id)
 
-        return await self.subscription_manager.forget(subs_id)
-
-    async def forget_all(self, *types) -> dict:
+    async def forget_all(self, *types, connection_id: Optional[int] = None) -> dict:
         """
         Forget / unsubscribe the subscriptions of given types.
 
@@ -345,6 +343,9 @@ class DerivAPI(DerivAPICalls):
         Parameter
         ---------
             *types : Any number of non-keyword arguments
+            connection_id : Optional[int]
+                The connection ID to use. If None, uses the default connection.
+                
         Example
         -------
             api.forget_all("ticks", "candles")
@@ -353,23 +354,33 @@ class DerivAPI(DerivAPICalls):
         -------
             Returns the dict
         """
+        return await self.subscription_manager.forget_all(*types, connection_id=connection_id)
 
-        return await self.subscription_manager.forget_all(*types)
-
-    async def disconnect(self) -> None:
+    async def disconnect(self, connection_id: Optional[int] = None) -> None:
         """
         Disconnect the websockets connection
 
+        Parameters
+        ----------
+        connection_id : Optional[int]
+            The connection ID to disconnect. If None, disconnects the default connection.
         """
-        if not self.connected.is_resolved():
-            return
-        self.connected = EasyFuture().reject(ConnectionClosedOK(None, Close(1000, 'Closed by disconnect')))
-        self.connected.exception()  # fetch exception to avoid the warning of 'exception never retrieved'
-        if self.wsconnection_from_inside:
-            # TODO NEXT reconnect feature
-            self.shouldReconnect = False
-            self.events.on_next({'name': 'close'})
-            await self.wsconnection.close()
+        if connection_id is not None:
+            # Disconnect the specified connection
+            connection = self.connection_manager.get_connection(connection_id)
+            if connection:
+                await connection.disconnect()
+        else:
+            # Disconnect the default connection
+            connection = self.connection_manager.get_connection(self.default_connection)
+            if connection:
+                await connection.disconnect()
+
+    async def disconnect_all(self) -> None:
+        """
+        Disconnect all websocket connections.
+        """
+        await self.connection_manager.disconnect_all()
 
     def expect_response(self, *msg_types):
         """
@@ -402,7 +413,7 @@ class DerivAPI(DerivAPICalls):
         if len(msg_types) == 1:
             return self.expect_response_types[msg_types[0]]
 
-        return asyncio.gather(map(lambda t: self.expect_response_types[t], msg_types))
+        return asyncio.gather(*[self.expect_response_types[t] for t in msg_types])
 
     def delete_from_expect_response(self, request: dict):
         """
@@ -449,7 +460,7 @@ class DerivAPI(DerivAPICalls):
         """
         Disconnect and cancel all the tasks        
         """
-        await self.disconnect()
+        await self.disconnect_all()
         for task in asyncio.all_tasks():
             if re.match(r"^deriv_api:", task.get_name()):
                 task.cancel('deriv api ended')
