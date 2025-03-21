@@ -1,5 +1,5 @@
 [packages]
-websockets = "==10.3"
+websockets = ">=10.3,<12.0"
 reactivex = "==4.0.*"
 deriv-api = {editable = true, path = "."}
 mako = ">=1.3.6"

@@ -55,6 +55,46 @@ If you pass the connection it's up to you to reconnect in case the connection dr
    api = DerivAPI(connection=connection)
 ```
 
+## Multi-Connection Support
+Python Deriv API now supports multiple concurrent WebSocket connections, allowing you to:
+
+- Connect to multiple Deriv API endpoints simultaneously
+- Send requests through specific connections
+- Subscribe to market data on dedicated connections
+- Implement connection-specific error handling
+
+### Creating and Using Multiple Connections
+
+```python
+import asyncio
+from deriv_api import DerivAPI
+
+async def main():
+    # Create the API with a default connection
+    api = DerivAPI(endpoint='ws.derivws.com', app_id=1234)
+    
+    # Create an additional connection for market data
+    market_conn = api.create_connection(
+        endpoint='ws.derivws.com', 
+        app_id=1234,
+        auto_reconnect=True
+    )
+    
+    # Use the default connection for account operations
+    account_info = await api.authorize({"authorize": "YOUR_API_TOKEN"})
+    
+    # Use the market connection for market data
+    ticks = await api.subscribe({"ticks": "R_100"}, connection_id=market_conn)
+    ticks.subscribe(lambda tick: print(f"Tick: {tick['tick']['quote']}"))
+    
+    # Close a specific connection when done
+    await api.disconnect(connection_id=market_conn)
+
+asyncio.run(main())
+```
+
+For more detailed examples and documentation on the multi-connection feature, see [Multi-Connection Support](docs/multi_connection.md).
+
 # Documentation
 
 #### API reference
@@ -113,5 +153,12 @@ set token and run example
 ```
 export DERIV_TOKEN=xxxTokenxxx
 PYTHONPATH=. python3 examples/simple_bot1.py
+```
+
+# Example with Multiple Connections
+
+```
+export DERIV_TOKEN=xxxTokenxxx
+PYTHONPATH=. python3 examples/multi_connection.py
 ```
 
