@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.8
+
+### Added:
+- Multi-connection support for handling multiple concurrent WebSocket connections
+- Auto-reconnection capability for WebSocket connections
+- Comprehensive documentation for the multi-connection feature
+
+### Changed:
+- Relaxed websockets dependency to allow versions >=10.3 and <12.0
+- Enhanced error handling with new ConnectionError class
+
 ## 0.1.7
 
 Sync API
