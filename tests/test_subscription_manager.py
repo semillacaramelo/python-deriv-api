@@ -16,14 +16,15 @@ class API:
         self.send_request = {}
         self.send_and_get_source_called = 0
         self.send_called = 0
+        self.default_connection = 0
 
-    def send_and_get_source(self, request: dict) -> Subject:
+    def send_and_get_source(self, request: dict, connection_id: int = 0) -> Subject:
         self.subject = Subject()
         self.send_and_get_source_called = self.send_and_get_source_called + 1
         self.send_and_get_source_request[self.send_and_get_source_called] = request
         return self.subject
 
-    async def send(self, request: dict):
+    async def send(self, request: dict, connection_id: int = 0):
         self.send_called = self.send_called + 1
         self.send_request[self.send_called] = request
         return request
@@ -51,7 +52,7 @@ async def test_subscribe():
     subscription_manager = SubscriptionManager(api)
     subs_id = 'ID11111'
     api.mocked_response = {"msg_type": "proposal", 'subscription': {'id': subs_id}}
-    assert not subscription_manager.source_exists({'proposal': 1}), "at start there is no such source"
+    assert not subscription_manager.source_exists({'proposal': 1}, 0), "at start there is no such source"
     with pytest.raises(APIError, match='Subscription type is not found in deriv-api'):
         await subscription_manager.subscribe({"no such type"})
     # get source first time
@@ -65,7 +66,7 @@ async def test_subscribe():
     source2, emit = await asyncio.gather(subscription_manager.subscribe({'proposal': 1}), api.emit())
     assert api.send_and_get_source_called == 0
     assert (source is source2), "same result"
-    assert (source is subscription_manager.get_source({'proposal': 1})), 'source is in the cache'
+    assert (source is subscription_manager.get_source({'proposal': 1}, 0)), 'source is in the cache'
     assert subscription_manager.source_exists({'proposal': 1}), "source in the cache"
     forget_result = await subscription_manager.forget(subs_id)
     assert api.send_called == 1

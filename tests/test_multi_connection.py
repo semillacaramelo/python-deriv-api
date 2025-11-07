@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+import pytest
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from deriv_api import DerivAPI
 from deriv_api.errors import ConnectionError
@@ -7,13 +8,14 @@ from deriv_api.errors import ConnectionError
 class TestMultiConnection(unittest.TestCase):
     """Integration tests for the multi-connection functionality."""
     
+    @pytest.mark.asyncio
     @patch('deriv_api.connection.Connection', autospec=True)
     @patch('deriv_api.connection_manager.ConnectionManager', autospec=True)
-    def setUp(self, mock_manager_class, mock_connection_class):
+    async def setUp(self, mock_manager_class, mock_connection_class):
         """Set up test fixtures."""
         self.app_id = "1234"
         self.endpoint = "ws.derivws.com"
-        
+
         # Set up mock connection manager
         self.mock_manager = MagicMock()
         self.mock_manager.create_connection.return_value = 0
@@ -22,21 +24,22 @@ class TestMultiConnection(unittest.TestCase):
         self.mock_manager.error_subject = MagicMock()
         self.mock_manager.error_subject.subscribe = MagicMock()
         mock_manager_class.return_value = self.mock_manager
-        
+
         # Set up mock connection
         self.mock_connection = AsyncMock()
         self.mock_connection.events = MagicMock()
         self.mock_connection.send = AsyncMock()
         self.mock_connection.send_and_get_source = MagicMock()
         mock_connection_class.return_value = self.mock_connection
-        
+
         # Create the API instance
         self.api = DerivAPI(
             endpoint=self.endpoint,
             app_id=self.app_id
         )
+        await asyncio.sleep(0.1) # wait for connect ready
     
-    def test_init(self):
+    async def test_init(self):
         """Test initialization of DerivAPI with connection manager."""
         # Verify connection manager is created
         self.assertEqual(self.api.connection_manager, self.mock_manager)
@@ -45,7 +48,7 @@ class TestMultiConnection(unittest.TestCase):
         self.mock_manager.create_connection.assert_called_once()
         self.assertEqual(self.api.default_connection, 0)
     
-    def test_create_connection(self):
+    async def test_create_connection(self):
         """Test creating a new connection through DerivAPI."""
         # Set up the mock
         self.mock_manager.create_connection.return_value = 1

@@ -1,0 +1,10 @@
+websockets>=10.3,<12.0
+reactivex==4.0.*
+-e .
+mako>=1.3.6
+pytest
+pytest-runner
+pytest-mock
+pytest-asyncio
+pdoc3
+coverage===4.5.4

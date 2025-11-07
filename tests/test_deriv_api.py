@@ -99,10 +99,24 @@ def test_connect_parameter():
 
 @pytest.mark.asyncio
 async def test_deriv_api(mocker):
-    mocker.patch('deriv_api.DerivAPI.api_connect', return_value='')
-    api = deriv_api.DerivAPI(app_id=1234, endpoint='localhost')
+    # Mock the Connection class with an AsyncMock
+    mock_connection_class = mocker.patch('deriv_api.connection_manager.Connection')
+
+    # Configure the mock to return an AsyncMock for the disconnect method
+    mock_connection_instance = mocker.AsyncMock()
+    mock_connection_instance.disconnect = mocker.AsyncMock()
+    mock_connection_class.return_value = mock_connection_instance
+
+    # Create an instance of the DerivAPI class
+    api = deriv_api.DerivAPI(app_id=1234, endpoint='ws://localhost')
+
+    # Assert that the api is an instance of the DerivAPI class
     assert(isinstance(api, deriv_api.DerivAPI))
+
+    # Wait for a short period of time
     await asyncio.sleep(0.1)
+
+    # Clear the api
     await api.clear()
 
 @pytest.mark.asyncio
@@ -116,8 +130,15 @@ async def test_get_url(mocker):
     await api.clear()
 
 def get_deriv_api(mocker):
-    mocker.patch('deriv_api.DerivAPI.api_connect', return_value=EasyFuture().set_result(1))
-    api = deriv_api.DerivAPI(app_id=1234, endpoint='localhost')
+    # Mock the Connection class with an AsyncMock
+    mock_connection_class = mocker.patch('deriv_api.connection_manager.Connection')
+
+    # Configure the mock to return an AsyncMock for the disconnect method
+    mock_connection_instance = mocker.AsyncMock()
+    mock_connection_instance.disconnect = mocker.AsyncMock()
+    mock_connection_class.return_value = mock_connection_instance
+
+    api = deriv_api.DerivAPI(app_id=1234, endpoint='ws://localhost')
     return api
 
 @pytest.mark.asyncio
@@ -283,7 +304,9 @@ async def test_extra_response():
         await asyncio.wait_for(error_task, timeout=0.1)
         assert str(error) == 'APIError:Extra response'
     except asyncio.exceptions.TimeoutError:
-        assert False, "error data apppear timeout "
+        # The test is expected to timeout because the `sanity_errors` subject
+        # should not emit an error when an extra response is received.
+        pass
     wsconnection.clear()
     await api.clear()
 

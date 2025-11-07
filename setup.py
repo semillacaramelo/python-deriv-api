@@ -16,7 +16,7 @@ setup(
         'Source Code': "https://github.com/deriv-com/python-deriv-api",
         'Changelog': "https://github.com/deriv-com/python-deriv-api/blob/master/CHANGELOG.md"
     },
-    python_requires=">=3.9.6, !=3.9.7",
+    python_requires=">=3.9",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: OS Independent",
