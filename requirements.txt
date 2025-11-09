@@ -8,3 +8,4 @@ pytest-mock
 pytest-asyncio
 pdoc3
 coverage===4.5.4
+pytest-reverse

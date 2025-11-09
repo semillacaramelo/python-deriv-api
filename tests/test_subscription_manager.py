@@ -67,7 +67,7 @@ async def test_subscribe():
     assert api.send_and_get_source_called == 0
     assert (source is source2), "same result"
     assert (source is subscription_manager.get_source({'proposal': 1}, 0)), 'source is in the cache'
-    assert subscription_manager.source_exists({'proposal': 1}), "source in the cache"
+    assert subscription_manager.source_exists({'proposal': 1}, 0), "source in the cache"
     forget_result = await subscription_manager.forget(subs_id)
     assert api.send_called == 1
     assert forget_result == {'forget': subs_id}

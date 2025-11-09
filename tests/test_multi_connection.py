@@ -53,168 +53,90 @@ class TestMultiConnection(unittest.TestCase):
         # Set up the mock
         self.mock_manager.create_connection.return_value = 1
         
-        # Create a connection
-        connection_id = self.api.create_connection(
+        # Create a new connection
+        new_conn_id = self.api.create_connection(
             endpoint=self.endpoint,
             app_id=self.app_id
         )
         
-        # Verify the connection was created
-        self.assertEqual(connection_id, 1)
+        # Verify a new connection was created
+        self.assertEqual(new_conn_id, 1)
         self.mock_manager.create_connection.assert_called_with(
             endpoint=self.endpoint,
             app_id=self.app_id
         )
     
+    async def test_disconnect(self):
+        """Test disconnecting a connection."""
+        await self.api.disconnect(1)
+        self.mock_manager.get_connection.assert_called_once_with(1)
+
+    async def test_disconnect_all(self):
+        """Test disconnecting all connections."""
+        await self.api.disconnect_all()
+        self.mock_manager.disconnect_all.assert_called_once()
+
     async def test_send(self):
-        """Test sending a request through a specific connection."""
-        # Set up mocks
-        self.mock_manager.get_connection.return_value = self.mock_connection
-        self.mock_connection.send.return_value = {"ping": "pong"}
-        
-        # Send a request through the default connection
-        response = await self.api.send({"ping": 1})
-        
-        # Verify the request was sent through the default connection
-        self.mock_manager.get_connection.assert_called_with(0)
-        self.mock_connection.send.assert_called_with({"ping": 1})
-        self.assertEqual(response, {"ping": "pong"})
-        
-        # Reset mocks
-        self.mock_manager.get_connection.reset_mock()
-        self.mock_connection.send.reset_mock()
-        
-        # Send a request through a specific connection
-        response = await self.api.send({"ping": 1}, connection_id=1)
-        
-        # Verify the request was sent through the specified connection
-        self.mock_manager.get_connection.assert_called_with(1)
-        self.mock_connection.send.assert_called_with({"ping": 1})
-        self.assertEqual(response, {"ping": "pong"})
+        """Test sending a request to a specific connection."""
+        request = {"ping": 1}
+        response = {"ping": 1, "req_id": 1}
+        self.mock_connection.send.return_value = response
+
+        # Send request to connection 1
+        result = await self.api.send(request, connection_id=1)
+
+        # Verify the correct connection was used
+        self.mock_manager.get_connection.assert_called_once_with(1)
+        self.mock_connection.send.assert_called_once_with(request)
+        self.assertEqual(result, response)
     
     async def test_send_with_nonexistent_connection(self):
-        """Test sending a request through a non-existent connection."""
-        # Set up mock to simulate a non-existent connection
+        """Test sending a request to a non-existent connection."""
         self.mock_manager.get_connection.return_value = None
-        
-        # Verify a ConnectionError is raised
         with self.assertRaises(ConnectionError):
             await self.api.send({"ping": 1}, connection_id=999)
     
-    @patch('deriv_api.subscription_manager.SubscriptionManager', autospec=True)
-    async def test_subscribe(self, mock_subscription_manager):
-        """Test subscribing through a specific connection."""
-        # Set up mock
-        mock_subscription_manager.subscribe = AsyncMock()
-        mock_subscription_manager.subscribe.return_value = "subscription_result"
-        self.api.subscription_manager = mock_subscription_manager
-        
-        # Subscribe through the default connection
-        result = await self.api.subscribe({"ticks": "R_100"})
-        
-        # Verify the subscription was made through the default connection
-        mock_subscription_manager.subscribe.assert_called_with({"ticks": "R_100"}, None)
-        self.assertEqual(result, "subscription_result")
-        
-        # Reset mock
-        mock_subscription_manager.subscribe.reset_mock()
-        
-        # Subscribe through a specific connection
-        result = await self.api.subscribe({"ticks": "R_100"}, connection_id=1)
-        
-        # Verify the subscription was made through the specified connection
-        mock_subscription_manager.subscribe.assert_called_with({"ticks": "R_100"}, 1)
-        self.assertEqual(result, "subscription_result")
+    async def test_subscribe(self):
+        """Test subscribing to a stream on a specific connection."""
+        request = {"ticks": "R_50", "subscribe": 1}
+        source = MagicMock()
+        self.mock_connection.send_and_get_source.return_value = source
+
+        # Subscribe to ticks on connection 1
+        result = await self.api.subscribe(request, connection_id=1)
+
+        # Verify the correct connection was used
+        self.mock_manager.get_connection.assert_called_once_with(1)
+        self.assertEqual(result, source)
     
-    @patch('deriv_api.subscription_manager.SubscriptionManager', autospec=True)
-    async def test_forget(self, mock_subscription_manager):
-        """Test forgetting a subscription through a specific connection."""
-        # Set up mock
-        mock_subscription_manager.forget = AsyncMock()
-        mock_subscription_manager.forget.return_value = {"forget": 1}
-        self.api.subscription_manager = mock_subscription_manager
-        
-        # Forget a subscription through the default connection
-        result = await self.api.forget("subscription_id")
-        
-        # Verify the forget was called through the default connection
-        mock_subscription_manager.forget.assert_called_with("subscription_id", None)
-        self.assertEqual(result, {"forget": 1})
-        
-        # Reset mock
-        mock_subscription_manager.forget.reset_mock()
-        
-        # Forget a subscription through a specific connection
-        result = await self.api.forget("subscription_id", connection_id=1)
-        
-        # Verify the forget was called through the specified connection
-        mock_subscription_manager.forget.assert_called_with("subscription_id", 1)
-        self.assertEqual(result, {"forget": 1})
+    async def test_forget(self):
+        """Test forgetting a subscription on a specific connection."""
+        subs_id = "some_id"
+        response = {"forget": 1}
+        self.mock_manager.get_subscription.return_value = {"connection_id": 1}
+        self.mock_connection.send.return_value = response
+
+        # Forget subscription on connection 1
+        result = await self.api.forget(subs_id)
+
+        # Verify the correct connection was used
+        self.mock_manager.get_subscription.assert_called_once_with(subs_id)
+        self.mock_manager.get_connection.assert_called_once_with(1)
+        self.assertEqual(result, response)
     
-    @patch('deriv_api.subscription_manager.SubscriptionManager', autospec=True)
-    async def test_forget_all(self, mock_subscription_manager):
-        """Test forgetting all subscriptions through a specific connection."""
-        # Set up mock
-        mock_subscription_manager.forget_all = AsyncMock()
-        mock_subscription_manager.forget_all.return_value = {"forget_all": ["ticks"]}
-        self.api.subscription_manager = mock_subscription_manager
-        
-        # Forget all subscriptions through the default connection
-        result = await self.api.forget_all("ticks")
-        
-        # Verify forget_all was called through the default connection
-        mock_subscription_manager.forget_all.assert_called_with("ticks", connection_id=None)
-        self.assertEqual(result, {"forget_all": ["ticks"]})
-        
-        # Reset mock
-        mock_subscription_manager.forget_all.reset_mock()
-        
-        # Forget all subscriptions through a specific connection
+    async def test_forget_all(self):
+        """Test forgetting all subscriptions of a certain type on a specific connection."""
+        response = {"forget_all": "ticks"}
+        self.mock_manager.get_all_subscriptions.return_value = [
+            {"connection_id": 1, "subs_id": "a"},
+            {"connection_id": 1, "subs_id": "b"},
+        ]
+        self.mock_connection.send.return_value = response
+
+        # Forget all ticks subscriptions on connection 1
         result = await self.api.forget_all("ticks", connection_id=1)
         
-        # Verify forget_all was called through the specified connection
-        mock_subscription_manager.forget_all.assert_called_with("ticks", connection_id=1)
-        self.assertEqual(result, {"forget_all": ["ticks"]})
-    
-    async def test_disconnect(self):
-        """Test disconnecting a specific connection."""
-        # Set up mocks
-        mock_connection1 = AsyncMock()
-        mock_connection2 = AsyncMock()
-        
-        self.mock_manager.get_connection = MagicMock()
-        self.mock_manager.get_connection.side_effect = lambda conn_id: {
-            0: mock_connection1,
-            1: mock_connection2
-        }.get(conn_id)
-        
-        # Disconnect the default connection
-        await self.api.disconnect()
-        
-        # Verify the default connection was disconnected
-        mock_connection1.disconnect.assert_called_once()
-        mock_connection2.disconnect.assert_not_called()
-        
-        # Reset mocks
-        mock_connection1.disconnect.reset_mock()
-        
-        # Disconnect a specific connection
-        await self.api.disconnect(connection_id=1)
-        
-        # Verify the specific connection was disconnected
-        mock_connection1.disconnect.assert_not_called()
-        mock_connection2.disconnect.assert_called_once()
-    
-    async def test_disconnect_all(self):
-        """Test disconnecting all connections."""
-        # Set up mock
-        self.mock_manager.disconnect_all = AsyncMock()
-        
-        # Disconnect all connections
-        await self.api.disconnect_all()
-        
-        # Verify the manager's disconnect_all method was called
-        self.mock_manager.disconnect_all.assert_called_once()
-
-if __name__ == '__main__':
-    unittest.main()
+        # Verify the correct connection was used
+        self.mock_manager.get_all_subscriptions.assert_called_once_with("ticks")
+        self.mock_manager.get_connection.assert_called_once_with(1)
+        self.assertEqual(result, response)

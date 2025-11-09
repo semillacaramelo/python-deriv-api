@@ -18,6 +18,8 @@ from deriv_api.middlewares import MiddleWares
 
 class MockedWs:
     def __init__(self):
+        self.id = id(self)
+        print(f"\n--- MockedWs CREATED: {self.id} ---")
         self.data = []
         self.called = {'send': [], 'recv' : []}
         self.slept_at = 0
@@ -39,6 +41,9 @@ class MockedWs:
                     if not d.get('subscription'):
                         self.data[idx] = None
         self.task_build_queue = asyncio.create_task(build_queue())
+
+    # ... (keep the existing 'send', 'recv', and 'add_data' methods exactly as they are) ...
+
     async def send(self, request):
         self.called['send'].append(request)
         request = json.loads(request)
@@ -85,6 +90,7 @@ class MockedWs:
         self.req_res_map[key] = response
 
     def clear(self):
+        print(f"\n--- MockedWs CLEARING: {self.id} ---")
         self.task_build_queue.cancel('end')
 
 def test_connect_parameter():
@@ -120,65 +126,48 @@ async def test_deriv_api(mocker):
     await api.clear()
 
 @pytest.mark.asyncio
-async def test_get_url(mocker):
-    api = get_deriv_api(mocker)
+async def test_get_url(deriv_api_fixture):
+    api = deriv_api_fixture
     assert api.get_url("localhost") == "wss://localhost"
     assert api.get_url("ws://localhost") == "ws://localhost"
     with pytest.raises(ConstructionError, match=r"Invalid URL:testurl"):
         api.get_url("testurl")
-    await asyncio.sleep(0.1)
-    await api.clear()
 
-def get_deriv_api(mocker):
-    # Mock the Connection class with an AsyncMock
-    mock_connection_class = mocker.patch('deriv_api.connection_manager.Connection')
 
-    # Configure the mock to return an AsyncMock for the disconnect method
-    mock_connection_instance = mocker.AsyncMock()
-    mock_connection_instance.disconnect = mocker.AsyncMock()
-    mock_connection_class.return_value = mock_connection_instance
-
-    api = deriv_api.DerivAPI(app_id=1234, endpoint='ws://localhost')
-    return api
 
 @pytest.mark.asyncio
-async def test_mocked_ws():
-    wsconnection = MockedWs()
+async def test_mocked_ws(mocked_ws):
     data1 = {"echo_req":{"ticks" : 'R_50', 'req_id': 1} ,"msg_type": "ticks", "req_id": 1, "subscription": {"id": "world"}}
     data2 = {"echo_req":{"ping": 1, 'req_id': 2},"msg_type": "ping", "pong": 1, "req_id": 2}
-    wsconnection.add_data(data1)
-    wsconnection.add_data(data2)
-    await wsconnection.send(json.dumps(data1["echo_req"]))
-    await wsconnection.send(json.dumps(data2["echo_req"]))
-    assert json.loads(await wsconnection.recv()) == data1, "we can get first data"
-    assert json.loads(await wsconnection.recv()) == data2, "we can get second data"
-    assert json.loads(await wsconnection.recv()) == data1, "we can still get first data becaues it is a subscription"
-    assert json.loads(await wsconnection.recv()) == data1, "we will not get second data because it is not a subscription"
-    assert len(wsconnection.called['send']) == 2
-    assert len(wsconnection.called['recv']) == 4
-    wsconnection.clear()
+    mocked_ws.add_data(data1)
+    mocked_ws.add_data(data2)
+    await mocked_ws.send(json.dumps(data1["echo_req"]))
+    await mocked_ws.send(json.dumps(data2["echo_req"]))
+    assert json.loads(await mocked_ws.recv()) == data1, "we can get first data"
+    assert json.loads(await mocked_ws.recv()) == data2, "we can get second data"
+    assert json.loads(await mocked_ws.recv()) == data1, "we can still get first data becaues it is a subscription"
+    assert json.loads(await mocked_ws.recv()) == data1, "we will not get second data because it is not a subscription"
+    assert len(mocked_ws.called['send']) == 2
+    assert len(mocked_ws.called['recv']) == 4
 
 @pytest.mark.asyncio
-async def test_simple_send():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection = wsconnection)
+async def test_simple_send(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     data1 = {"echo_req":{"ping": 1},"msg_type": "ping", "pong": 1}
     data2 = {"echo_req":{"ticks" : 'R_50'} ,"msg_type": "ticks"}
-    wsconnection.add_data(data1)
-    wsconnection.add_data(data2)
+    mocked_ws.add_data(data1)
+    mocked_ws.add_data(data2)
     res1 = data1.copy()
     add_req_id(res1, 1)
     res2 = data2.copy()
     add_req_id(res2, 2)
     assert await api.send(data1['echo_req']) == res1
     assert await api.ticks(data2['echo_req']) == res2
-    assert len(wsconnection.called['send']) == 2
-    wsconnection.clear()
-    await api.clear()
+    assert len(mocked_ws.called['send']) == 2
 
 @pytest.mark.asyncio
-async def test_middleware():
-    wsconnection = MockedWs()
+async def test_middleware(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     send_will_be_called_args = None
     send_is_called_args = None
     send_will_be_called_return = None
@@ -195,17 +184,17 @@ async def test_middleware():
         nonlocal send_is_called_return
         return send_is_called_return
 
-    api = deriv_api.DerivAPI(connection = wsconnection, middlewares = MiddleWares({'sendWillBeCalled': send_will_be_called, 'sendIsCalled': send_is_called}))
+    api.middlewares = MiddleWares({'sendWillBeCalled': send_will_be_called, 'sendIsCalled': send_is_called})
     req1 = {"ping": 2}
 
     # test sendWillBeCalled return true value, sendIsCalled will be not called and the request will not be sent to ws
     data1 = {"echo_req":req1,"msg_type": "ping", "pong": 1,}
-    wsconnection.add_data(data1)
+    mocked_ws.add_data(data1)
     send_will_be_called_return = {'value': 1} # middleware sendWillBeCalled will return a dict
     response = await api.send(req1)
     assert response == send_will_be_called_return # api will return the value of sendWillBeCalled returned
     assert send_will_be_called_args == {'request': req1}
-    assert len(wsconnection.called['send']) == 0 # ws send is not called
+    assert len(mocked_ws.called['send']) == 0 # ws send is not called
 
     # test sendWillBeCalled return false value, ws send will be called and sendIsCalled will be called
     send_will_be_called_return = None
@@ -218,17 +207,13 @@ async def test_middleware():
 
     # test sendWillBeCalled return false , and sendIsCalled return a true value
     send_is_called_return = {'value': 2}
-    wsconnection.add_data(data1)
+    mocked_ws.add_data(data1)
     response = await api.send(req1)
     assert response == {'value': 2} # will get what sendIsCalled return
 
-    wsconnection.clear()
-    await api.clear()
-
 @pytest.mark.asyncio
-async def test_subscription():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_subscription(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     r50_data = {
         'echo_req': {'ticks': 'R_50', 'subscribe': 1},
         'msg_type': 'tick',
@@ -239,8 +224,8 @@ async def test_subscription():
         'msg_type': 'tick',
         'subscription': {'id': 'A22222'}
     }
-    wsconnection.add_data(r50_data)
-    wsconnection.add_data(r100_data)
+    mocked_ws.add_data(r50_data)
+    mocked_ws.add_data(r100_data)
     r50_req = r50_data['echo_req']
     r50_req.pop('subscribe');
     r100_req = r100_data['echo_req']
@@ -252,25 +237,22 @@ async def test_subscription():
     result = await asyncio.gather(f1, f2)
     assert result == [[r50_data, r50_data], [r100_data, r100_data]]
     await asyncio.sleep(0.01)  # wait sending 'forget' finished
-    assert wsconnection.called['send'] == [
+    assert mocked_ws.called['send'] == [
         '{"ticks": "R_50", "subscribe": 1, "req_id": 1}',
         '{"ticks": "R_100", "subscribe": 1, "req_id": 2}',
         '{"forget": "A11111", "req_id": 3}',
         '{"forget": "A22222", "req_id": 4}']
-    wsconnection.clear()
-    await api.clear()
 
 @pytest.mark.asyncio
-async def test_forget():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_forget(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     # test subscription forget will mark source done
     r50_data = {
         'echo_req': {'ticks': 'R_50', 'subscribe': 1},
         'msg_type': 'tick',
         'subscription': {'id': 'A11111'}
     }
-    wsconnection.add_data(r50_data)
+    mocked_ws.add_data(r50_data)
     r50_req = r50_data['echo_req']
     r50_req.pop('subscribe');
     sub1: rx.Observable = await api.subscribe(r50_req)
@@ -286,20 +268,17 @@ async def test_forget():
     await api.forget('A11111')
     await asyncio.sleep(0.1)
     assert complete, 'subscription stopped after forget'
-    wsconnection.clear()
-    await api.clear()
 
 
 @pytest.mark.asyncio
-async def test_extra_response():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_extra_response(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     error = None
     async def get_sanity_error():
         nonlocal error
         error = await api.sanity_errors.pipe(op.first(),op.to_future())
     error_task = asyncio.create_task(get_sanity_error())
-    wsconnection.data.append({"hello":"world"})
+    mocked_ws.data.append({"hello":"world"})
     try:
         await asyncio.wait_for(error_task, timeout=0.1)
         assert str(error) == 'APIError:Extra response'
@@ -307,19 +286,16 @@ async def test_extra_response():
         # The test is expected to timeout because the `sanity_errors` subject
         # should not emit an error when an extra response is received.
         pass
-    wsconnection.clear()
-    await api.clear()
 
 @pytest.mark.asyncio
-async def test_response_error():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_response_error(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     r50_data = {
         'echo_req': {'ticks': 'R_50', 'subscribe': 1},
         'msg_type': 'tick',
         'error': {'code': 'TestError', 'message': 'test error message'}
     }
-    wsconnection.add_data(r50_data)
+    mocked_ws.add_data(r50_data)
     sub1 = await api.subscribe(r50_data['echo_req'])
     f1 = sub1.pipe(op.first(), op.to_future())
     with pytest.raises(ResponseError, match='ResponseError: test error message'):
@@ -330,60 +306,54 @@ async def test_response_error():
         'req_id': f1.exception().req_id,
         'subscription': {'id': 'A111111'}
     }
-    wsconnection.data.append(r50_data) # add back r50 again
+    mocked_ws.data.append(r50_data) # add back r50 again
     #will send a `forget` if get a response again
     await asyncio.sleep(0.1)
-    assert wsconnection.called['send'][-1] == '{"forget": "A111111", "req_id": 2}'
+    assert mocked_ws.called['send'][-1] == '{"forget": "A111111", "req_id": 2}'
     poc_data = {
         'echo_req': {'proposal_open_contract': 1, 'subscribe': 1},
         'msg_type': 'proposal_open_contract',
         'error': {'code': 'TestError', 'message': 'test error message'},
         'subscription': {'id': 'ABC11111'}
     }
-    wsconnection.add_data(poc_data)
+    mocked_ws.add_data(poc_data)
     sub1 = await api.subscribe(poc_data['echo_req'])
     response = await sub1.pipe(op.first(), op.to_future())
     assert 'error' in response, "for the poc stream with out contract_id, the error response will not terminate the stream"
-    wsconnection.clear()
-    await api.clear()
 
 @pytest.mark.asyncio
-async def test_cache():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
-    wsconnection.add_data({'ping':'pong', 'msg_type': 'ping', 'echo_req' : {'ping': 1}})
+async def test_cache(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
+    mocked_ws.add_data({'ping':'pong', 'msg_type': 'ping', 'echo_req' : {'ping': 1}})
     ping1 = await api.ping({'ping': 1})
-    assert len(wsconnection.called['send']) == 1
+    assert len(mocked_ws.called['send']) == 1
     ping2 = await api.expect_response('ping')
-    assert len(wsconnection.called['send']) == 1, 'send can cache value for expect_response. get ping2 from cache, no send happen'
+    assert len(mocked_ws.called['send']) == 1, 'send can cache value for expect_response. get ping2 from cache, no send happen'
     assert ping1 == ping2, "ping2 is ping1 "
     ping3 = await api.cache.ping({'ping': 1})
-    assert len(wsconnection.called['send']) == 1, 'get ping3 from cache, no send happen'
+    assert len(mocked_ws.called['send']) == 1, 'get ping3 from cache, no send happen'
     assert ping1 == ping3, "ping3 is ping1 "
-    wsconnection.clear()
-    await api.clear()
 
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
-    wsconnection.add_data({'ping': 'pong', 'msg_type': 'ping', 'echo_req': {'ping': 1}})
+    mocked_ws = MockedWs()
+    api = deriv_api.DerivAPI(connection=mocked_ws)
+    mocked_ws.add_data({'ping': 'pong', 'msg_type': 'ping', 'echo_req': {'ping': 1}})
     ping1 = await api.cache.ping({'ping': 1})
-    assert len(wsconnection.called['send']) == 1
+    assert len(mocked_ws.called['send']) == 1
     ping2 = await api.expect_response('ping')
-    assert len(wsconnection.called['send']) == 1, 'api.cache.ping can cache value. get ping2 from cache, no send happen'
+    assert len(mocked_ws.called['send']) == 1, 'api.cache.ping can cache value. get ping2 from cache, no send happen'
     assert ping1 == ping2, "ping2 is ping1 "
-    wsconnection.clear()
+    mocked_ws.clear()
     await api.clear()
 
 @pytest.mark.asyncio
-async def test_can_subscribe_one_source_many_times():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_can_subscribe_one_source_many_times(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     r50_data = {
         'echo_req': {'ticks': 'R_50', 'subscribe': 1},
         'msg_type': 'tick',
         'subscription': {'id': 'A11111'}
     }
-    wsconnection.add_data(r50_data)
+    mocked_ws.add_data(r50_data)
     r50_req = r50_data['echo_req']
     r50_req.pop('subscribe');
     sub1 = await api.subscribe(r50_req)
@@ -392,47 +362,39 @@ async def test_can_subscribe_one_source_many_times():
     result = await asyncio.gather(f1,f2)
     assert result == [[r50_data, r50_data],[r50_data, r50_data]]
     await asyncio.sleep(0.01)  # wait sending 'forget' finished
-    assert wsconnection.called['send'] == [
+    assert mocked_ws.called['send'] == [
         '{"ticks": "R_50", "subscribe": 1, "req_id": 1}',
         '{"forget": "A11111", "req_id": 2}']
-    wsconnection.clear()
-    await api.clear()
 
 @pytest.mark.asyncio
-async def test_reuse_poc_stream():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_reuse_poc_stream(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     buy_data = {'echo_req': {'buy': 1, 'subscribe': 1},
                            'subscription':  {'id': 'B111111'},
                            'buy': {'contract_id': 1234567},
                            'msg_type': 'proposal_open_contract'
                            }
-    wsconnection.add_data(buy_data)
+    mocked_ws.add_data(buy_data)
     sub1 = await api.subscribe(buy_data['echo_req'])
     await asyncio.sleep(0.1) # wait for setting reused stream
     sub2 = await api.subscribe({'proposal_open_contract': 1, 'contract_id': 1234567})
     assert id(sub1) == id(sub2)
-    assert len(api.subscription_manager.buy_key_to_contract_id) == 1
+    assert len(api.subscription_manager.buy_key_to_contract_id_by_connection[0]) == 1
     await api.forget('B111111')
-    assert len(api.subscription_manager.buy_key_to_contract_id) == 0
-    wsconnection.clear()
-    await api.clear()
+    assert len(api.subscription_manager.buy_key_to_contract_id_by_connection[0]) == 0
 
 @pytest.mark.asyncio
-async def test_expect_response():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
-    wsconnection.add_data({'ping':'pong', 'msg_type': 'ping', 'echo_req' : {'ping': 1}})
+async def test_expect_response(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
+    mocked_ws.add_data({'ping':'pong', 'msg_type': 'ping', 'echo_req' : {'ping': 1}})
     get_ping = api.expect_response('ping')
     assert not get_ping.done(), 'get ping is a future and is pending'
     ping_result = await api.ping({'ping': 1})
     assert get_ping.done(), 'get ping done'
     assert ping_result == await get_ping
-    wsconnection.clear()
-    await api.clear()
 
 @pytest.mark.asyncio
-async def test_ws_disconnect():
+async def test_ws_disconnect(deriv_api_fixture):
     class MockedWs2(MockedWs):
         def __init__(self):
             self.closed = EasyFuture()
@@ -441,7 +403,7 @@ async def test_ws_disconnect():
         async def close(self):
             self.closed.resolve(self.exception)
             pass
-        async def send(self):
+        async def send(self, data):
             exc = await self.closed
             raise exc
         async def recv(self):
@@ -481,16 +443,14 @@ async def test_ws_disconnect():
     await api.clear()
 
 @pytest.mark.asyncio
-async def test_add_task():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_add_task(deriv_api_fixture):
+    api = deriv_api_fixture
     exception_f = api.sanity_errors.pipe(op.first(), op.to_future())
     async def raise_an_exception():
         raise Exception("test add_task")
     api.add_task(raise_an_exception(), 'raise an exception')
     exception = await exception_f
     assert str(exception) == 'deriv_api:raise an exception: test add_task'
-    await api.clear()
 
 def add_req_id(response, req_id):
     response['echo_req']['req_id'] = req_id
@@ -498,9 +458,8 @@ def add_req_id(response, req_id):
     return response
 
 @pytest.mark.asyncio
-async def test_eventgs():
-    wsconnection = MockedWs()
-    api = deriv_api.DerivAPI(connection=wsconnection)
+async def test_eventgs(deriv_api_fixture, mocked_ws):
+    api = deriv_api_fixture
     event_data = []
 
     def on_next(data):
@@ -509,8 +468,6 @@ async def test_eventgs():
 
     api.events.subscribe(on_next=on_next )
     wsdata = {'ping': 'pong', 'msg_type': 'ping', 'echo_req': {'ping': 1}}
-    wsconnection.add_data(wsdata)
+    mocked_ws.add_data(wsdata)
     await api.ping({'ping': 1})
     assert event_data == [{'name': 'send', 'data': {'ping': 1, 'req_id': 1}}, {'name': 'message', 'data': wsdata}]
-    wsconnection.clear()
-    await api.clear()
